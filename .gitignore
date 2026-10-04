@@ -1,8 +1,17 @@
+# Environment variables
 .env
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+
+# Virtual environments
 .venv/
 venv/
-.env/
-data/faiss_index/
+
+# FAISS vector stores
+data/faiss/
+
+# Jupyter
 .ipynb_checkpoints/

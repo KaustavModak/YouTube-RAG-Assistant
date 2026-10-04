@@ -1,7 +1,7 @@
 from src.ingestion import get_transcript
 from src.splitter import split_text
 from src.embeddings import get_embeddings
-from src.vectorstore import create_vector_store
+from src.vectorstore import create_vector_store, save_vector_store, load_vector_store
 from src.llm import get_llm
 from src.rag_chain import build_rag_chain
 from src.youtube_utils import extract_video_id
@@ -9,6 +9,7 @@ from src.youtube_utils import extract_video_id
 from langchain_core.prompts import PromptTemplate
 
 import streamlit as st
+import os
 
 # application-level configuration
 st.set_page_config(
@@ -26,6 +27,11 @@ def load_embeddings():
 @st.cache_resource
 def load_llm():
     return get_llm()
+
+# loading transcript
+@st.cache_data
+def load_transcript(video_id):
+    return get_transcript(video_id=video_id)
 
 embeddings = load_embeddings()
 llm = load_llm()
@@ -72,69 +78,128 @@ if process_button:
                 label="Processing video...",
                 expanded=True
             ):
-                
-                # 1) getting transcript
-                st.write("Fetching transcript...")
-                transcript = get_transcript(video_id=video_id)
-                st.write(
-                    f"Transcript loaded with {len(transcript)} characters"
+                # path where videos's FAISS index will be stored
+                faiss_path = os.path.join(
+                    "data","faiss",video_id
                 )
 
-                # 2) splitting text
-                st.write("Splitting text...")
-                documents = split_text(transcript)
-                st.write(f"Created {len(documents)} chunks")
+                # checking whether FAISS already exists
+                if os.path.exists(faiss_path):
+                    st.write("Existing vector store found")
+                    # loading existing FAISS index
+                    vector_store = load_vector_store(
+                        path=faiss_path,
+                        embeddings=embeddings
+                    )
 
-                # 3) embeddings + FAISS
-                st.write("Creating vector store...")
-                vector_store = create_vector_store(
-                    documents=documents,
-                    embeddings=embeddings
-                )
+                else:
+                    st.write("No existing vector store found")
+
+                    # 1) getting transcript
+                    st.write("Fetching transcript...")
+                    transcript = load_transcript(video_id=video_id)
+                    st.write(
+                        f"Transcript loaded with {len(transcript)} characters"
+                    )
+
+                    # 2) splitting text
+                    st.write("Splitting text...")
+                    documents = split_text(transcript)
+                    st.write(f"Created {len(documents)} chunks")
+
+                    # 3) embeddings + FAISS
+                    st.write("Creating vector store...")
+                    vector_store = create_vector_store(
+                        documents=documents,
+                        embeddings=embeddings
+                    )
+
+                    # 4) saving FAISS
+                    st.write("Saving vector store...")
+                    save_vector_store(
+                        vector_store=vector_store,
+                        path=faiss_path
+                    )
+                    st.write("Vector store saved successfully")
                 
-                # 4) creating retriever
+                # 5) creating retriever
                 st.write("Creating retriever...")
                 retriever = vector_store.as_retriever(
                     search_type="similarity",
                     search_kwargs={'k':4}
                 )
 
-                # 5) creating prompt
+                # 6) creating prompt
+                history_prompt = PromptTemplate(
+                    template="""
+                    You are given a conversation between a user and an assistant.
+
+                    Use the conversation history to rewrite the user's
+                    current question into a standalone question.
+
+                    Do not answer the question.
+
+                    If the current question is already standalone,
+                    return it unchanged.
+
+                    Conversation history:
+                    {history}
+
+                    Current question:
+                    {question}
+
+                    Standalone question:
+                    """,
+                    input_variables=["history", "question"]
+                )
+
+
                 prompt = PromptTemplate(
                     template="""You are a question-answering assistant.
 
                     Answer the user's question using ONLY the
-                    provided video transcript context.
+                    provided video transcript context and conversation history.
 
                     Rules:
 
-                    1. Do not use outside knowledge.
-                    2. If the answer cannot be found in the
-                    context, say:
+                    1. Use the video transcript as the primary source of truth.
+                    2. Use conversation history to understand references
+                    to previous questions and answers.
+                    3. Do not use outside knowledge.
+                    4. If the answer cannot be found in the video context,
+                    say:
                     "I don't know based on the provided video."
-                    3. Do not invent information.
-                    4. Keep the answer clear and concise.
+                    5. Do not invent information.
+                    6. Keep the answer clear and concise.
 
-                    Context:
+                    Conversation History:
+                    {history}
+
+                    Video Context:
                     {context}
 
                     Question:
                     {question}
 
                     Answer:""",
-                    input_variables=['context','question']
+                    input_variables=[
+                        "history",
+                        "context",
+                        "question"
+                    ]
                 )
 
-                # 6) building rag chain
+                # 7) building rag chain
                 st.write("Building RAG pipeline...")
 
                 rag_chain = build_rag_chain(
                     retriever=retriever,
                     prompt=prompt,
-                    model=llm
+                    model=llm,
+                    history_prompt=history_prompt
                 )
 
-                # 7) store in session
+                # 8) store in session
                 st.session_state.rag_chain = rag_chain # saves the built rag chain
                 st.session_state.video_id = video_id # saves the video id
                 st.session_state.messages = [] # clears the old conversation related to old processed video
@@ -169,6 +234,14 @@ if question:
     if st.session_state.rag_chain is None:
         st.warning("Please process the YouTube video first.")
     else:
+        # building conversation history
+        history = ""
+        for message in st.session_state.messages:
+            history+=(
+                f"{message['role'].capitalize()}: "
+                f"{message['content']}\n"
+            )
+            
         # display user question
         with st.chat_message("user"):
             st.markdown(question)
@@ -184,7 +257,10 @@ if question:
             with st.spinner(
                 "Searching the video and generating answer..."
             ):
-                answer = st.session_state.rag_chain.invoke(question)
+                answer = st.session_state.rag_chain.invoke({
+                    "history":history,
+                    "question":question
+                })
             st.markdown(answer)
 
         # saving assistant response
@@ -192,3 +268,32 @@ if question:
             "role":"assistant",
             "content":answer
         })
+
+#                   ┌──────────────────┐
+#                   │ Conversation     │
+#                   │ History          │
+#                   └────────┬─────────┘
+#                            │
+#                            ▼
+# Current Question ──► Question Rewriter
+#                            │
+#                            ▼
+#                     Standalone Question
+#                            │
+#                  ┌─────────┴──────────┐
+#                  ▼                    ▼
+#              FAISS                  History
+#                  │                    │
+#                  ▼                    │
+#           Video Transcript            │
+#               Context                │
+#                  │                    │
+#                  └─────────┬──────────┘
+#                            ▼
+#                     Final Prompt
+#                            │
+#                            ▼
+#                          Qwen
+#                            │
+#                            ▼
+#                         Answer
