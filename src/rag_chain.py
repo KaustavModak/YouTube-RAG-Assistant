@@ -1,10 +1,12 @@
-from langchain_core.runnables import RunnableParallel, RunnableLambda
+from langchain_core.runnables import RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
+
+from src.reranker import rerank_documents
 
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
-def build_rag_chain(retriever, prompt, model, history_prompt):
+def build_rag_chain(retriever, prompt, model, history_prompt, reranker):
 
     parser = StrOutputParser()
 
@@ -17,21 +19,27 @@ def build_rag_chain(retriever, prompt, model, history_prompt):
 
         rewritten_question = rewrite_chain.invoke({"history":history,"question":question})
 
+        documents = retriever.invoke(rewritten_question) # retrieves 10 docs(candidates)
+
+        reranked_documents = rerank_documents( # returns the best 4 candidates out of 10
+            query=rewritten_question,
+            documents=documents,
+            reranker=reranker,
+            top_k=4
+        )
+
+        context = format_docs(reranked_documents)
+
         return {
-            "history":history,
-            "question":rewritten_question
+            "history": history,
+            "context": context,
+            "question": rewritten_question
         }
 
     prepared_input = RunnableLambda(prepare_input)
 
-    parallel_chain = RunnableParallel({
-        "history":RunnableLambda(lambda x:x["history"]),
-        "context":RunnableLambda(lambda x:x["question"]) | retriever | RunnableLambda(format_docs),
-        "question": RunnableLambda(lambda x:x["question"])
-    })
-
     gen_chain = prompt | model | parser
 
-    rag_chain = prepared_input | parallel_chain | gen_chain
+    rag_chain = prepared_input | gen_chain
 
     return rag_chain

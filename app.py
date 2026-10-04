@@ -5,8 +5,8 @@ from src.vectorstore import create_vector_store, save_vector_store, load_vector_
 from src.llm import get_llm
 from src.rag_chain import build_rag_chain
 from src.youtube_utils import extract_video_id
-
-from langchain_core.prompts import PromptTemplate
+from src.prompts import load_history_prompt, load_gen_prompt
+from src.reranker import get_reranker
 
 import streamlit as st
 import os
@@ -33,8 +33,14 @@ def load_llm():
 def load_transcript(video_id):
     return get_transcript(video_id=video_id)
 
+# loading reranker
+@st.cache_resource
+def load_reranker():
+    return get_reranker()
+
 embeddings = load_embeddings()
 llm = load_llm()
+reranker = load_reranker()
 
 # session state
 # Remember user's session data
@@ -126,68 +132,13 @@ if process_button:
                 st.write("Creating retriever...")
                 retriever = vector_store.as_retriever(
                     search_type="similarity",
-                    search_kwargs={'k':4}
+                    search_kwargs={'k':10}      # top 10 docs to be retrieved for reranking
                 )
 
                 # 6) creating prompt
-                history_prompt = PromptTemplate(
-                    template="""
-                    You are given a conversation between a user and an assistant.
+                history_prompt = load_history_prompt()
 
-                    Use the conversation history to rewrite the user's
-                    current question into a standalone question.
-
-                    Do not answer the question.
-
-                    If the current question is already standalone,
-                    return it unchanged.
-
-                    Conversation history:
-                    {history}
-
-                    Current question:
-                    {question}
-
-                    Standalone question:
-                    """,
-                    input_variables=["history", "question"]
-                )
-
-
-                prompt = PromptTemplate(
-                    template="""You are a question-answering assistant.
-
-                    Answer the user's question using ONLY the
-                    provided video transcript context and conversation history.
-
-                    Rules:
-
-                    1. Use the video transcript as the primary source of truth.
-                    2. Use conversation history to understand references
-                    to previous questions and answers.
-                    3. Do not use outside knowledge.
-                    4. If the answer cannot be found in the video context,
-                    say:
-                    "I don't know based on the provided video."
-                    5. Do not invent information.
-                    6. Keep the answer clear and concise.
-
-                    Conversation History:
-                    {history}
-
-                    Video Context:
-                    {context}
-
-                    Question:
-                    {question}
-
-                    Answer:""",
-                    input_variables=[
-                        "history",
-                        "context",
-                        "question"
-                    ]
-                )
+                prompt = load_gen_prompt()
 
                 # 7) building rag chain
                 st.write("Building RAG pipeline...")
@@ -196,7 +147,8 @@ if process_button:
                     retriever=retriever,
                     prompt=prompt,
                     model=llm,
-                    history_prompt=history_prompt
+                    history_prompt=history_prompt,
+                    reranker=reranker
                 )
 
                 # 8) store in session
@@ -269,31 +221,65 @@ if question:
             "content":answer
         })
 
-#                   ┌──────────────────┐
-#                   │ Conversation     │
-#                   │ History          │
-#                   └────────┬─────────┘
-#                            │
-#                            ▼
-# Current Question ──► Question Rewriter
-#                            │
-#                            ▼
-#                     Standalone Question
-#                            │
-#                  ┌─────────┴──────────┐
-#                  ▼                    ▼
-#              FAISS                  History
-#                  │                    │
-#                  ▼                    │
-#           Video Transcript            │
-#               Context                │
-#                  │                    │
-#                  └─────────┬──────────┘
-#                            ▼
-#                     Final Prompt
-#                            │
-#                            ▼
-#                          Qwen
-#                            │
-#                            ▼
-#                         Answer
+#                     YouTube URL
+#                          │
+#                          ▼
+#                     Video ID
+#                          │
+#                          ▼
+#                  Persistent FAISS
+#                  ┌──────────────┐
+#                  │              │
+#               Exists          Doesn't exist
+#                  │              │
+#                  ▼              ▼
+#               Load FAISS    Transcript
+#                                │
+#                                ▼
+#                              Split
+#                                │
+#                                ▼
+#                            Embeddings
+#                                │
+#                                ▼
+#                              FAISS
+#                                │
+#                                ▼
+#                              Save
+#                  └───────┬──────┘
+#                          │
+#                          ▼
+#                       Retriever
+#                          │
+#                          │
+# User question ───────────┤
+#                          │
+#                          ▼
+#                  Question Rewriter
+#                          ▲
+#                          │
+#                  Conversation History
+#                          │
+#                          ▼
+#                 Standalone Question
+#                          │
+#                          ▼
+#                        FAISS
+#                          │
+#                          ▼
+#                  Relevant Context
+#                          │
+#           ┌──────────────┴──────────────┐
+#           │                             │
+#    Conversation History          Video Context
+#           │                             │
+#           └──────────────┬──────────────┘
+#                          │
+#                          ▼
+#                    Final Prompt
+#                          │
+#                          ▼
+#                         Qwen
+#                          │
+#                          ▼
+#                        Answer
