@@ -209,11 +209,20 @@ if question:
             with st.spinner(
                 "Searching the video and generating answer..."
             ):
-                answer = st.session_state.rag_chain.invoke({
+                result = st.session_state.rag_chain.invoke({   # result receives final answer and citations
                     "history":history,
                     "question":question
                 })
-            st.markdown(answer)
+
+                answer = result["answer"] # final answer
+                sources = result["sources"] # citations
+
+            st.markdown(answer) # prints the final answer
+            with st.expander("References"): # printing the citations/references
+                for source in sources:
+                    st.markdown(
+                        f'> "{source}"'
+                    )
 
         # saving assistant response
         st.session_state.messages.append({

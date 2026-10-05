@@ -17,7 +17,7 @@ def build_rag_chain(retriever, prompt, model, history_prompt, reranker):
         history = inputs["history"]
         question = inputs["question"]
 
-        rewritten_question = rewrite_chain.invoke({"history":history,"question":question})
+        rewritten_question = rewrite_chain.invoke({"history":history,"question":question}) # gets the rewritten question
 
         documents = retriever.invoke(rewritten_question) # retrieves 10 docs(candidates)
 
@@ -33,12 +33,31 @@ def build_rag_chain(retriever, prompt, model, history_prompt, reranker):
         return {
             "history": history,
             "context": context,
-            "question": rewritten_question
+            "question": rewritten_question,
+            "documents":reranked_documents    # returns the reranked docs for citations
         }
 
     prepared_input = RunnableLambda(prepare_input)
 
-    gen_chain = prompt | model | parser
+    def generate_answer(inputs):
+        history = inputs["history"]
+        context = inputs["context"]
+        question = inputs["question"]
+        documents = inputs["documents"]
+
+        answer = (prompt | model | parser).invoke({
+            "history":history,
+            "context":context,
+            "question":question
+        })
+        return {
+            "answer":answer,
+            "sources":[
+                doc.page_content for doc in documents
+            ]
+        }
+
+    gen_chain = RunnableLambda(generate_answer)
 
     rag_chain = prepared_input | gen_chain
 
